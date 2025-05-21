@@ -1,0 +1,718 @@
+= Akari: Protocol Specification
+:toc: left
+:toclevels: 3
+:sectnums:
+:xrefstyle: full
+chocycat <chocycat@catboy.to>
+
+== Abstract
+
+This document specifies Akari, a protocol for building Linux display systems based on a highly modular, component-based architecture. The primary goal is to provide a flexible and independent foundation for graphical sessions by enabling clearly defined and interchangeable core components.
+
+== Introduction
+
+Modern Linux graphical systems rely on complex interactions between applications, system services, and hardware. Akari proposes a new approach to managing these interactions, diverging from traditional monolithic or integrated display server architectures. It specifies a protocol designed around the principles of modularity, explicit state management, and clear separation of concerns.
+
+This specification details the Akari protocol, defining the required components, their interactions, the communication methods, the object model, and the expected behaviors necessary to build a compliant Akari display system.
+
+=== Terminology
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in https://www.rfc-editor.org/rfc/rfc2119[RFC 2119].
+[[architecture]]
+== Architecture
+
+=== Overview
+
+Akari follows a component-based architecture. Unlike integrated display server models, Akari distributes responsibilities across distinct processes communicating via IPC mechanisms.
+
+At its core is a central *Controller* acting as a message broker and state controller. Specialized *Manager* processes connect to the Controller to provide system services like window management or input handling. Standard *Applications* also connect as clients to display content and receive input.
+
+  ┌───────────┐                                ┌───────────┐
+  │    App    │◄──┐                        ┌──►│  Manager  │
+  └───────────┘   │                        │   └───────────┘
+  ┌───────────┐   │    ┌──────────────┐    │   ┌───────────┐
+  │    App    │◄──┼───►│  Controller  │◄───┼──►│  Manager  │
+  └───────────┘   │    └──────────────┘    │   └───────────┘
+  ┌───────────┐   │                        │   ┌───────────┐
+  │    App    │◄──┘                        └──►│  Manager  │
+  └───────────┘                                └───────────┘
+
+=== Core Components
+
+Akari defines three primary component roles:
+
+==== Controller
+
+Role:: The central authority in an Akari session. It acts as a message broker,  manages authoritive object state, and enforces protocol rules. It is essential for system operation.
+
+Responsibilities::
+  * Manage client connections, disconnections and lifecycle
+  * Route messages between clients (Applications and Managers) according to protocol rules and message targets (see <<communication-model>>).
+  * Maintain the authoritive state for all Akari <<objects>>.
+  * Mediate permission requests between clients and the Permission Manager (see <<permissions>>).
+
+Implementation:: Typically a standalone daemon process.
+
+==== Managers
+
+Role:: Specialized, often priviliged components that provide core desktop system services. Managers act as clients of the Controller but are the primary providers of user-facing functionality.
+
+Implementation:: Independent processes communicating with the Controller
+
+===== Recognized Managers
+
+Akari defines roles for essential managers required for a baseline functional system. Compliant Akari systems MUST provide implementations for these roles, though different implementations MAY be used.
+
+==== Applications
+
+Role:: Standard user-facing programs that display graphical content and interact with the user. Applications are clients of the Controller and consumers of services prvoided by Managers.
+
+Implementation:: Standard programs that implement the Akari protocol
+
+Responsibilities::
+  * Establish a connection to the Controller
+  * Create and manage their own <<window, `Window` objects>> via the Controller
+  * Render content into associated <<buffer, `Buffer` objects>>
+  * Commit buffer updates and state changes via <<frame-synchronization, synchronization mechanisms>>.
+  * Process <<inputevent, `InputEvent`>> messages and <<change-notification, `ChangeNotification`>> messages
+
+[[communication-model]]
+=== Communication Model
+
+All communication between Applications and Managers MUST be mediated by the Controller. Direct communication between other clients over the Akari protocol is forbidden.
+
+  ┌───────────┐  "Hello, app" ┌──────────────┐  "Hello, app" ┌───────────┐
+  │           │◄──────────────┤              │◄──────────────┤           │
+  │    App    │               │  Controller  │               │  Manager  │
+  │           ├──────────────►│              │x─x─x─x─x─x─x─x│           │
+  └───────────┘ "Hi, manager" └──────────────┘               └───────────┘
+
+NOTE: As shown above, messages sent by Applications to other clients are blocked by the Controller. Applications cannot send messages directly to other clients.
+
+[[communication-constraints]]
+==== Communication Constraints
+
+* Applications MUST NOT send messages directly to other Applications or Managers. They MUST send all messages to the Controller (typically `target=0` for requests to the Controller itself, or replies). Messages sent by Applications with `target` set to another client ID MUST be rejected by the Controller.
+* Managers MAY send messages to other specific clients (Applications or other Managers) by setting the `MessageHeader.target` field to the recipient's client ID and sending the message to the Controller. The Controller MUST forward such messages.
+* The Controller MAY send messages to any client (e.g., notifications, replies).
+
+[[transport]]
+== Transport Mechanism
+
+Akari defines two primary mechanisms for communication between the Controller and clients: Unix Domain Sockets (UDS) for general message passing and shared memory buffers for time-sensitive bulk data transfer.
+
+[[transport-uds]]
+=== Unix Domain Sockets
+
+The primary transport for Akari protocol messages MUST be UDS.
+
+Clients establish a connection by connecting to a well-known UDS path created by the Controller upon startup. The mechanism for discovering this path is outside the scope of this protocol (e.g. environment variables, standard path).
+
+Communication is bidirectional. Both the Controller and connected clients MAY send and receive messages asynchronously.
+
+All messages transferred over UDS MUST be serialized using the *FlatBuffers* serialization library, conforming to the schemas defined in <<messages>>. Implementations MUST use the FlatBuffers Verifier on all received messages before processing (see <<message-verification>>).
+
+File descriptor passing (for <<shared-memory-buffers>> and <<frame-synchronization, fences>>) MUST be performed using `SCM_RIGHTS` ancillary data over the UDS connection.
+
+=== Shared Memory Buffers
+
+For bulk data transfer requiring minimal latency and overhead (primarily graphical content), Akari defines shared memory buffers.
+
+Implementations MUST support two types of shared memory buffers, corresponding to different use cases:
+
+Data Buffers (`memfd`):: Anonymous memory file descriptors created using `memfd_create(2)`. These provide CPU-accessible shared memory suitable for general data sharing or software rendering.
+DMA Buffers (`DMA-BUF`):: File descriptors representing buffers accessible via Direct Memory Access (DMA), typically managed by graphics or multimedia hardware drivers. These are essential for efficient zero-copy sharing of graphical buffers between applications, the Window Manager, and the GPU.
+
+Roles::
+  Producer::: The client that creates and owns the buffer, typically having exclusive write access.
+  Consumer::: Any other client granted read-only access to the buffer.
+
+The internal data layout or schema within a shared memory buffer is NOT defined by the Akari protocol itself. Consumers MUST interpret the buffer's content based on metadata provided separately (e.g., stored in the corresponding <<buffer, `Buffer` object>>).
+
+Access to shared memory buffers, especially `DMA-BUF` used for rendering, requires synchronization. This MUST be handled using explicit synchronization primitives, primarily fence file descriptors passed via UDS. See <<frame-synchronization>>.
+[[messages]]
+== Message Format
+
+All communication between the Controller and clients over the primary <<transport-uds, Unix Domain Socket transport>> MUST use messages serialized with FlatBuffers according to the schemas defined herein.
+
+[[message-schema,Message Schema]]
+=== Structure
+
+[[message-header, MessageHeader]]
+.MessageHeader
+|===
+| Name | Type | Description
+
+| `id`
+| `uint32`
+| *Required:* Sender's unique sequential message ID.
+
+| `target`
+| `[uint32]`
+| *Required:* Recipient ID. See semantics below.
+
+| `type`
+| `uint16`
+| *Required:* Identifies the message body.
+
+| `status`
+| `uint8`
+| Status code (0=success, others indicate errors)
+
+| `reply_to`
+| `uint32`
+| ID of the message being replied to (0 if none)
+|===
+
+`id`::
+  A unique sequential identifier for the message, generated by the *sender*. IDs MUST be unique within the context of a single connection and SHOULD increment monotonically (wrapping around is permissible). Primarily used for matching replies (via `reply_to`).
+`targets`::
+  A list of `uint32` values identifying the intended recipient(s). This field MUST NOT be null, but MAY be empty. The ID `0` represents the Controller itself. The interpretation is as follows:
+  * `[]` (empty list) -- *Broadcast.* The sender requests the Controller to broadcast this message. The Controller MUST determine the appropriate set of recipients based on the sender's role and permissions, then send the messages individually to the recipients.
+  * `[0]` -- *Controller Target.* The message is intended exclusively for processing by the Controller itself.
+  * `[ClientID]` -- *Unicast.* The message targets a single specific client (Application or Manager) with the given `ClientID` (where `ClientID > 0`).
+  * `[ClientID1, ClientID2, ...]`: *Multicast.* The message targets multiple specific clients. The list MUST NOT contain duplicates and MUST NOT contain `0` if other ClientIDs are present.
+
+.Message
+|===
+| Name | Type | Description
+
+| `header`
+| <<message-header>>
+| *Required:* Contains metadata of the message
+
+| `body`
+| `[ubyte]`
+| *Required:* An opaque payload. Interpretation depends on `header.type`. MUST be validated by the *recipient* based on the type.
+|===
+
+=== Constraints
+
+* *Replies/Statuses are Unicast:* If the `reply_to` field is non-zero OR the `status` field is non-zero, the `targets` list MUST contain exactly one element, and that element MUST be a `ClientID` greater than 0. Replies and status updates are always unicast to a specific client.
+* *Application Sending Restrictions:* As defined in <<communication-constraints>>, Applications MUST only send messages where `targets` is `[0]` (i.e., messages directed only to the Controller). They MUST NOT send messages with specific ClientIDs or empty (Broadcast) `targets`.
+
+=== Message Replies
+
+Within Akari, interactions often follow a request-response pattern, although many messages (like notifications or events) do not require a direct reply.
+
+Requests:: A message initiating an operation or query MAAY implicitly or explicitly require a response.
+Responses:: A message is considered a response _if and only if_ its `MessageHeader.reply_to` field contains the `id` of a previously sent Request message.
+
+For any given Request message, the recipient MUST send at most one Response message.
+
+The `MessageHeader.status` field in a Response message indicates the outcome of an operation requested by the original message.
+
+[[message-verification]]
+=== Verification
+
+For security against malicious messages, implementations MUST validate every received message using the FlatBuffers Verifier *before* attempting to access any data fields via the FlatBuffers API.
+
+1. Upon receiving a byte buffer from the UDS socket, the receiver MUST run the FlatBuffers Verifier using the defined <<message-schema>> as the expected root type.
+2. If this initial verification fails:
+  * The message is structurally invalid and its contents cannot be trusted.
+  * The message MUST be discarded immediately.
+  * No data access MUST be attempted.
+  * An error SHOULD be logged, potentially including the source if known.
+  * If the receiving component is the Controller and the sender is a client, the Controller MAY choose to disconnect the client if invalid messages persist.
+  * *No Response or Error message MUST be sent back in this case.*
+3. If outer verification passes, the `header` fields can be safely accessed.
+4. The `body` byte slice can be safely accessed (its offset/length are valid).
+5. The content of the `body` MUST then be validated by the ultimate recipient based on the `header.type`:
+  * If the `body` is expected to contain another FlatBuffers message (recommended), the FlatBuffers verifier MUST be run again on the `body` slice using the appropriate schema before accessing its contents. Failure of this verification means the message body is invalid.
+  * If the `body` contains non-FlatBuffers data, manual validation MUST be performed. Failure means the body is invalid.
+  * Even if the `body` is structurally valid, the recipient MUST perform semantic validation on the contained data (e.g., checking if IDs exist, values are in rage, requested operation is permitted by rules/permissions). Failure means the request is invalid or disallowed.
+6. If the outer message passed verification, but the `body` fails validation or represents a semantically invalid/disallowed request:
+  * The request is considered invalid or disallowed.
+  * If the original message normally expects a response, the receiver SHOULD send a <<message-replies, Response message>> back to the original sender.
+    * This Response must set the `status` to a non-zero error code (e.g., <<err-InvalidMessage,Invalid Message>>, <<err-Unauthorized,Unauthorized>>).
+  * If the original message did not normally expect a response, the receiver MAY simply discard the message with the invalid body and log the error.
+
+[[lifecycle]]
+== Client Lifecycle
+
+This section describes how clients connect to, register with and disconnect from the Controller.
+
+=== Connection
+
+Clients initiate communication by connecting to the Controller's well-known UDS.
+
+1. The Controller MUST create and listen on a UDS socket upon startup.
+   While the precise mechanism for clients to discover the Controller's socket path is outside the strict scope of the specification, recommended methods are:
+   * An environment variable, `$AKARI_SOCKET`, containing the full path to the Controller's socket. Clients SHOULD prioritize using the path from this variable if it is set and valid.
+   * If `$AKARI_SOCKET` is not set, clients SHOULD look for the socket at a standard path within the user's runtime directory, defined by `$XDG_RUNTIME_DIR`. The RECOMMENDED path is `$XDG_RUNTIME_DIR/akari-0`.
+2. A client connects to the determined socket path using standard OS mechanisms.
+3. Once the connection is established, the communication channel operates asynchronously using the <<messages, message format>> over the <<transport-uds, UDS transport>>.
+
+=== Registration
+
+Upon establishing a connection, a client MUST register itself with the Controller to identify its type and capabilities before performing other operations.
+
+The Controller then processes the registration:
+
+1. The Controller MUST verify if `client_type` is `MANAGER`, the Controller MUST check if registering this manager violates any <<manager-uniqueness, uniqueness constraints>>.
+2. The Controller MUST assign a unique `client_id` (greater than 0) to the successfully registering client.
+3. The Controller MUST record the client's ID, type and manager role (if applicable).
+4. If `requested_permissions` is present, and a Permission Manager is registered, the Controller SHOULD forward these requests according to the <<permissions, permission model>>. If no Permission Manager is present, initial requests SHOULD be denied or deferred.
+
+.Message: `REGISTER`
+[%collapsible%open]
+====
+This message is sent by clients to the Controller upon startup.
+
+.Request
+|===
+| Name | Type | Description
+
+| `client_type`
+| <<enum-ClientType, `ClientType`>>
+| Indicating whether the client is an `APPLICATION` (0) or a `MANAGER` (1)
+
+| `manager_role`
+| <<enum-ManagerRole, `Optional<ManagerRole>`>>
+| Specifies the role the Manager intends to fulfill (e.g. `WINDOW_MANAGER`). Managers that don't fit a role must specify `255`.
+
+| `requested_permissions`
+| <<enum-PermissionScope, `PermissionScope[]` >>
+| Specifies an array of requested permissions for pre-approval.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `client_id`
+| `uint32`
+| The client ID assigned to the new client.
+|===
+
+.Errors
+<<err-InvalidMessage,Invalid Message>>::
+  * `client_type` is not `ClientType`
+  * `manager_role` is not `ManagerRole`
+  * `requested_permissions` contains an invalid `PermissionScope`
+<<err-Conflict,Conflict>>:: Registering the client vould violate uniqueness constraints.
+====
+
+=== Disconnection
+
+Clients may disconnect explicitly or implicitly.
+
+.Explicit Disconnection
+1. A client MAY send a `DISCONNECT` message to the Controller
+2. Upon receiving `DISCONNECT`, the Controller SHOULD acknowledge and then MUST close the connection and clean up associated resources.
+
+.Implicit Disconnection
+If the Controller detects that a client's UDS connection has been closed, it MUST treat this as an implicit disconnection.
+
+==== Resource Cleanup
+
+Upon any disconnection (explicit or implicit), the Controller MUST perform cleanup, which includes:
+
+* Closing the socket connection.
+* Destroying all <<objects>> owned by the disconnected client.
+* Notifying other relevant clients about the destruction of objects or the client's disconnection where necessary.
+[[objects]]
+== Objects
+
+Akari manages the shared state of the desktop system, such as windows and buffers, through entities called **Objects**.
+
+=== Concepts
+
+Objects represent identifiable resources whose authoritative state is maintained exclusively by the **Controller**.
+
+Interaction with Objects occurs indirectly via operational messages sent to the Controller: `CREATE_OBJECT`, `READ_OBJECT`, `UPDATE_OBJECT`, and `DESTROY_OBJECT`. These messages identify the target Object and contain structured payloads, typically using <<payload-unions, FlatBuffers Unions>>, to handle data specific to different Object types efficiently and safely.
+
+=== Object Identity
+
+It is important to distinguish between:
+
+Object Type:: Defines the kind of Object and implies its expected properties and behavior (e.g., `WINDOW`, `BUFFER`, `CURSOR`). Core Object Types are predefined by this protocol.
+Object Instance:: A specific occurrence of an Object Type, identified by its unique `object_id`, holding its own state (property values). For example, Window `object_id=3` is an instance of the `WINDOW` Object Type.
+
+Each Object instance is assigned a unique `object_id` (`uint32`) by the Controller upon creation. This ID is used in messages to refer to that specific Object instance. Object identity may also involve its type (see below) for certain operations.
+
+=== Interaction Messages
+
+Interacting with Objects follows a CRUD pattern.
+
+.Message: `CREATE_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to create a new Object instance of a specific type.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_Type`
+| <<enum-ObjectType, `objectType`>>
+| *Required*: The <<enum-ObjectType, Object Type>> to create.
+
+| `properties`
+| <<schema-ObjectProps, `ObjectProps`>>
+| *Required*: A FlatBuffers Union containing a table with the initial properties specific to the `object_type`.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The unique ID assigned by the Controller to the newly created Object instance.
+|===
+
+.Errors
+<<err-InvalidMessage,Invalid Message>>:: The `properties` payload failed verification for the specified `object_type` or contained invalid initial values.
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to create Objects of this `object_type`.
+====
+
+.Message: `READ_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to read the current properties of an existing Object instance.
+
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object instance to read.
+
+| `filter`
+| `Optional<uint16[]>`
+| A list of specific Property IDs to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object whose properties are being returned. This MUST match the request's `object_id`.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The actual type of the Object read.
+
+| `properties`
+| <<schema-ObjectProps, `objectProps`>>
+| *Required:* A FlatBuffers Union containing a table with the current, readable properties specific to the `object_type`.
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read this Object.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: The specified `object_type` does not match the actual type of the object found with `object_id`.
+====
+
+.Message: `UPDATE_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to update properties of an existing Object instance.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object instance to update.
+
+| `changes`
+| <<schema-PartialObjectProps, `PartialObjectProps`>>
+| *Required:* A FlatBuffers Union containing a table with only the properties to be changed and their new values.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to update this Object or specific properties within `changes`.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: The `changes` payload failed verification or contained invalid values/disallowed modifications.
+====
+
+.Message: `DESTROY_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to destroy an existing Object instance.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+|  *Required:* The ID of the Object instance to destroy.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to destroy this Object.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+====
+
+When a client disconnects (explicitly via a `DISCONNECT` message or implicitly via socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client.
+
+Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2`.
+
+=== Permissions
+Access control for reading, modifying, and deleting objects is based on client **Role** (Manager or Application), object **Ownership**, and property-specific **Authority** levels defined with each property (see <<object-definitions>>).
+
+Every object instance has exactly one **owner**, which is the client that initially created it via `CREATE_OBJECT`.
+
+The default access rights are summarized below:
+
+.Access Control
+[cols="1,^1,^1,^1,^1"]
+|===
+| Role \ Action | Owner (App) | Owner (Mgr) | Manager (Non-Owner) | Application (Non-Owner)
+
+| Read Properties (`READ_OBJECT`) {fn-readable}
+| Yes
+| Yes
+| Yes
+| No (Requires Permission) <1>
+
+| Update Properties (`UPDATE_OBJECT`) <3>
+| Conditional <4>
+| Yes
+| Yes
+| No (Requires Permission) <2>
+
+| Delete Object (`DELETE_OBJECT`)
+| Yes
+| Yes
+| No
+| No (Requires Permission) <2>
+|===
+<1> Assumes properties are marked Readable (`R` flag). Clients may lack permission to read specific objects even if they exist.
+<2> Access/permission may potentially be granted via the <<permissions, Permission Manager>> system (details TBD).
+<3> Applies only to properties marked Writable (`W` flag).
+<4> Application owners **MUST NOT** modify properties where the defined `Authority` level is `MANAGER`. See <<property-authority>>.
+
+[[object-subscriptions]]
+=== Subscriptions
+
+To monitor Object state changes efficiently without polling, clients use Akari's publish-subscribe (Pub/Sub) mechanism.
+
+Clients can subscribe to changes on specific Object instances or all instances of a specific core Object type. When a relevant change occurs, the Controller sends notifications containing only the modified data (the delta) to subscribed clients.
+
+.Message: `SUBSCRIBE`
+[%collapsible%open]
+====
+Requests the Controller to create a new subscription for monitoring object state changes.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* ID of the specific Object instance to subscribe to. Set to `0` to subscribe to all Objects of the specified `object_type`.
+
+| `object_type`
+| <<enum-ObjectType, `Optional<ObjectType>`>>
+| The type of objects to subscribe to when `object_id` is `0`. MUST be ignored if `object_id` is non-zero.
+
+| `filter`
+| `Optional<uint16[]>`
+| A list of specific Property IDs (relative to the `object_type`) to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* A unique identifier assigned by the Controller for this specific subscription instance. This ID is needed to unsubscribe later.
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read/subscribe to the target Object(s).
+<<err-NotFound,Not Found>>:: Specified `object_id` (if > 0) or `object_type` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: Invalid combination of `object_id` and `object_type` (e.g. `object_id=0` and no `object_type`).
+====
+
+.Message: `UNSUBSCRIBE`
+[%collapsible%open]
+====
+Cancels an existing subscription.
+
+.Request
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* THe ID of the subscription to cancel, previously returned by a `SUBSCRIBE` reply.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client does not own the `subscription_id`.
+<<err-NotFound,Not Found>>:: `subscription_id` does not exist or is not active for this client.
+====
+
+Subscriptions SHOULD be cancelled and cleaned up by the Controller when a client disconnects.
+
+=== Updates
+
+When the Controller processes the creation/update/destruction for an Object, it checks for active subscriptions matching that object. For each match, the Controller sends an `OBJECT_UPDATED` message to the subscribed client(s). This message requires no reply from the client.
+
+.Message: `OBJECT_UPDATED`
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* Identifies the subscription that triggered this message.
+
+| `object_id`
+| `uint32`
+| *Required:* Identifies the Object that was updated or destroyed.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The type of Object identified by `object_id`.
+
+| `update_type`
+| `uint8`
+| *Required:* The type of Object update: (0=Creation, 1=Modification, 2=Destruction)
+
+| `delta`
+| <<schema-PartialObjectType, `Optional<PartialObjectType>`>>
+| A FlatBuffers Union containing the specified changed properties. This field can only be absent if `update_type` is `2`, otherwise it MUST be defined.
+|===
+
+=== Property Filters
+
+Clients MAY filter `READ_OBJECT` or `SUBSCRIBE` results based on specific object properties using the optional `filter` field, which takes a list of numeric <<enum-PropertyID,Property IDs>>.
+
+When the Controller is processing a request containing a filter, the Controller MUST validate that every ID in the provided list is a valid, defined Property ID for the specified `object_type`. If any ID is invalid, the Controller MUST reject the entire request with an <<err-InvalidMessage,Invalid Message>> error. The Controller MUST NOT ignore invalid IDs.
+
+If validation passes, the Controller uses the provided list to filter results. If the list is absent or empty, no filtering occurs.
+[appendix]
+[[protocol-errors]]
+== Protocol Errors
+
+Akari defines reserved status codes for some errors. Errors should only be returned on messages that specify `reply_to`.
+
+|===
+| Name | Description | Error Code
+
+[[err-InvalidMessage]]
+| *Invalid Message*
+| Returned if a request message body, while structurally valid (passed verification), contained semantically invalid parameters or could not be processed as requested.
+| `1`
+
+[[err-Unauthorized]]
+| *Unauthorized*
+| Returned when the requesting client does not have permission to perform the requested action on the target object or resource.
+| `2`
+
+[[err-NotFound]]
+| *Not Found*
+| Returned when a referenced object or resource does not exist.
+| `3`
+
+[[err-Conflict]]
+| *Conflict*
+| Returned when the requested operation could not be completed because it conflicts with the current state of a resource.
+| `4`
+|===
+[appendix]
+[[protocol-data-types]]
+== Protocol Data Types
+
+This appendix defines common data types, enumerations (enums), and bitmask flags referenced throughout the Akari protocol specification. All compliant implementations MUST adhere to these definitions when interpreting protocol messages and object properties.
+
+[[enum-ClientType]]
+.`ClientType`
+|===
+| Name | Value
+
+| `APPLICATION`
+| `0`
+
+| `MANAGER`
+| `1`
+|===
+
+[[enum-ManagerRole]]
+.`ManagerRole`
+|===
+| Name | Value
+
+| `WINDOW_MANAGER`
+| `0`
+
+| `INPUT_MANAGER`
+| `1`
+
+| Reserved Values
+| `2-254`
+
+| Unspecified Manager
+| `255`
+|===
+
+[[enum-PermissionScope]]
+.`PermissionScope`
+|===
+| Name | Value | Description
+
+| `SCOPE_NONE`
+| `0`
+| Placeholder, no permission.
+
+| `SCOPE_READ_OTHER_CLIENT_BUFFER`
+| `1`
+| Allows reading the content of Buffers owned by other clients.
+
+| `SCOPE_READ_GLOBAL_INPUT`
+| `2`
+| Allows receiving input events even when not focused.
+
+| `SCOPE_CREATE_VIRTUAL_INPUT`
+| `3`
+| Allows creating synthetic input events.
+
+| Reserved Values
+| `5-65535`
+| Reserved for future scopes.
+|===
+
+[[enum-ObjectType]]
+.`ObjectType`
+|===
+| Name | Value | Definition
+
+| `CLIENT` | `0` | Represents a connected client process (Application or Manager). See <<obj-Client>>.
+| `WINDOW` | `1` | Represents a window. See <<obj-Window>>.
+| `BUFFER` | `2` | Represents a shared memory buffer. See <<obj-Buffer>>
+| `OUTPUT` | `3` | Represents a display output/monitor connected to the system. See <<obj-Output>>.
+| `CURSOR` | `4` | Represents a cursor image and hotspot. See <<obj-Cursor>>.
+| Reserved | `5-65535` | Reserved for future object types.
+|===
+
+[[enum-PropertyID]]
+=== Property IDs
+
+// TODO
+// TODO
