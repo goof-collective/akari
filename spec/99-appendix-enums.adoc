@@ -1,0 +1,79 @@
+[appendix]
+[[protocol-data-types]]
+== Protocol Data Types
+
+This appendix defines common data types, enumerations (enums), and bitmask flags referenced throughout the Akari protocol specification. All compliant implementations MUST adhere to these definitions when interpreting protocol messages and object properties.
+
+[[enum-ClientType]]
+.`ClientType`
+|===
+| Name | Value
+
+| `APPLICATION`
+| `0`
+
+| `MANAGER`
+| `1`
+|===
+
+[[enum-ManagerRole]]
+.`ManagerRole`
+|===
+| Name | Value
+
+| `WINDOW_MANAGER`
+| `0`
+
+| `INPUT_MANAGER`
+| `1`
+
+| Reserved Values
+| `2-254`
+
+| Unspecified Manager
+| `255`
+|===
+
+[[enum-PermissionScope]]
+.`PermissionScope`
+|===
+| Name | Value | Description
+
+| `SCOPE_NONE`
+| `0`
+| Placeholder, no permission.
+
+| `SCOPE_READ_OTHER_CLIENT_BUFFER`
+| `1`
+| Allows reading the content of Buffers owned by other clients.
+
+| `SCOPE_READ_GLOBAL_INPUT`
+| `2`
+| Allows receiving input events even when not focused.
+
+| `SCOPE_CREATE_VIRTUAL_INPUT`
+| `3`
+| Allows creating synthetic input events.
+
+| Reserved Values
+| `5-65535`
+| Reserved for future scopes.
+|===
+
+[[enum-ObjectType]]
+.`ObjectType`
+|===
+| Name | Value | Definition
+
+| `CLIENT` | `0` | Represents a connected client process (Application or Manager). See <<obj-Client>>.
+| `WINDOW` | `1` | Represents a window. See <<obj-Window>>.
+| `BUFFER` | `2` | Represents a shared memory buffer. See <<obj-Buffer>>
+| `OUTPUT` | `3` | Represents a display output/monitor connected to the system. See <<obj-Output>>.
+| `CURSOR` | `4` | Represents a cursor image and hotspot. See <<obj-Cursor>>.
+| Reserved | `5-65535` | Reserved for future object types.
+|===
+
+[[enum-PropertyID]]
+=== Property IDs
+
+// TODO

@@ -1,0 +1,22 @@
+= Akari: Protocol Specification
+:toc: left
+:toclevels: 3
+:sectnums:
+:xrefstyle: full
+chocycat <chocycat@catboy.to>
+
+== Abstract
+
+This document specifies Akari, a protocol for building Linux display systems based on a highly modular, component-based architecture. The primary goal is to provide a flexible and independent foundation for graphical sessions by enabling clearly defined and interchangeable core components.
+
+== Introduction
+
+Modern Linux graphical systems rely on complex interactions between applications, system services, and hardware. Akari proposes a new approach to managing these interactions, diverging from traditional monolithic or integrated display server architectures. It specifies a protocol designed around the principles of modularity, explicit state management, and clear separation of concerns.
+
+This specification details the Akari protocol, defining the required components, their interactions, the communication methods, the object model, and the expected behaviors necessary to build a compliant Akari display system.
+
+=== Terminology
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", 
+"SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this 
+document are to be interpreted as described in https://www.rfc-editor.org/rfc/rfc2119[RFC 2119].

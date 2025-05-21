@@ -1,0 +1,294 @@
+[[objects]]
+== Objects
+
+Akari manages the shared state of the desktop system, such as windows and buffers, through entities called **Objects**.
+
+=== Concepts
+
+Objects represent identifiable resources whose authoritative state is maintained exclusively by the **Controller**.
+
+Interaction with Objects occurs indirectly via operational messages sent to the Controller: `CREATE_OBJECT`, `READ_OBJECT`, `UPDATE_OBJECT`, and `DESTROY_OBJECT`. These messages identify the target Object and contain structured payloads, typically using <<payload-unions, FlatBuffers Unions>>, to handle data specific to different Object types efficiently and safely.
+
+=== Object Identity
+
+It is important to distinguish between:
+
+Object Type:: Defines the kind of Object and implies its expected properties and behavior (e.g., `WINDOW`, `BUFFER`, `CURSOR`). Core Object Types are predefined by this protocol.
+Object Instance:: A specific occurrence of an Object Type, identified by its unique `object_id`, holding its own state (property values). For example, Window `object_id=3` is an instance of the `WINDOW` Object Type.
+
+Each Object instance is assigned a unique `object_id` (`uint32`) by the Controller upon creation. This ID is used in messages to refer to that specific Object instance. Object identity may also involve its type (see below) for certain operations.
+
+=== Interaction Messages
+
+Interacting with Objects follows a CRUD pattern.
+
+.Message: `CREATE_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to create a new Object instance of a specific type.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_Type`
+| <<enum-ObjectType, `objectType`>>
+| *Required*: The <<enum-ObjectType, Object Type>> to create.
+
+| `properties`
+| <<schema-ObjectProps, `ObjectProps`>>
+| *Required*: A FlatBuffers Union containing a table with the initial properties specific to the `object_type`.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The unique ID assigned by the Controller to the newly created Object instance.
+|===
+
+.Errors
+<<err-InvalidMessage,Invalid Message>>:: The `properties` payload failed verification for the specified `object_type` or contained invalid initial values.
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to create Objects of this `object_type`.
+====
+
+.Message: `READ_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to read the current properties of an existing Object instance.
+
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object instance to read.
+
+| `filter`
+| `Optional<uint16[]>`
+| A list of specific Property IDs to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object whose properties are being returned. This MUST match the request's `object_id`.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The actual type of the Object read.
+
+| `properties`
+| <<schema-ObjectProps, `objectProps`>>
+| *Required:* A FlatBuffers Union containing a table with the current, readable properties specific to the `object_type`.
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read this Object.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: The specified `object_type` does not match the actual type of the object found with `object_id`.
+====
+
+.Message: `UPDATE_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to update properties of an existing Object instance.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* The ID of the Object instance to update.
+
+| `changes`
+| <<schema-PartialObjectProps, `PartialObjectProps`>>
+| *Required:* A FlatBuffers Union containing a table with only the properties to be changed and their new values.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to update this Object or specific properties within `changes`.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: The `changes` payload failed verification or contained invalid values/disallowed modifications.
+====
+
+.Message: `DESTROY_OBJECT`
+[%collapsible%open]
+====
+Requests the Controller to destroy an existing Object instance.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+|  *Required:* The ID of the Object instance to destroy.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to destroy this Object.
+<<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
+====
+
+When a client disconnects (explicitly via a `DISCONNECT` message or implicitly via socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client.
+
+Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2`.
+
+=== Permissions
+Access control for reading, modifying, and deleting objects is based on client **Role** (Manager or Application), object **Ownership**, and property-specific **Authority** levels defined with each property (see <<object-definitions>>).
+
+Every object instance has exactly one **owner**, which is the client that initially created it via `CREATE_OBJECT`.
+
+The default access rights are summarized below:
+
+.Access Control
+[cols="1,^1,^1,^1,^1"]
+|===
+| Role \ Action | Owner (App) | Owner (Mgr) | Manager (Non-Owner) | Application (Non-Owner)
+
+| Read Properties (`READ_OBJECT`) {fn-readable}
+| Yes
+| Yes
+| Yes
+| No (Requires Permission) <1>
+
+| Update Properties (`UPDATE_OBJECT`) <3>
+| Conditional <4>
+| Yes
+| Yes
+| No (Requires Permission) <2>
+
+| Delete Object (`DELETE_OBJECT`)
+| Yes
+| Yes
+| No
+| No (Requires Permission) <2>
+|===
+<1> Assumes properties are marked Readable (`R` flag). Clients may lack permission to read specific objects even if they exist.
+<2> Access/permission may potentially be granted via the <<permissions, Permission Manager>> system (details TBD).
+<3> Applies only to properties marked Writable (`W` flag).
+<4> Application owners **MUST NOT** modify properties where the defined `Authority` level is `MANAGER`. See <<property-authority>>.
+
+[[object-subscriptions]]
+=== Subscriptions
+
+To monitor Object state changes efficiently without polling, clients use Akari's publish-subscribe (Pub/Sub) mechanism.
+
+Clients can subscribe to changes on specific Object instances or all instances of a specific core Object type. When a relevant change occurs, the Controller sends notifications containing only the modified data (the delta) to subscribed clients.
+
+.Message: `SUBSCRIBE`
+[%collapsible%open]
+====
+Requests the Controller to create a new subscription for monitoring object state changes.
+
+.Request
+|===
+| Name | Type | Description
+
+| `object_id`
+| `uint32`
+| *Required:* ID of the specific Object instance to subscribe to. Set to `0` to subscribe to all Objects of the specified `object_type`.
+
+| `object_type`
+| <<enum-ObjectType, `Optional<ObjectType>`>>
+| The type of objects to subscribe to when `object_id` is `0`. MUST be ignored if `object_id` is non-zero.
+
+| `filter`
+| `Optional<uint16[]>`
+| A list of specific Property IDs (relative to the `object_type`) to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* A unique identifier assigned by the Controller for this specific subscription instance. This ID is needed to unsubscribe later.
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read/subscribe to the target Object(s).
+<<err-NotFound,Not Found>>:: Specified `object_id` (if > 0) or `object_type` does not exist.
+<<err-InvalidMessage,Invalid Message>>:: Invalid combination of `object_id` and `object_type` (e.g. `object_id=0` and no `object_type`).
+====
+
+.Message: `UNSUBSCRIBE`
+[%collapsible%open]
+====
+Cancels an existing subscription.
+
+.Request
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* THe ID of the subscription to cancel, previously returned by a `SUBSCRIBE` reply.
+|===
+
+.Response
+|===
+^| _Empty Body_
+|===
+
+.Errors
+<<err-Unauthorized,Unauthorized>>:: Client does not own the `subscription_id`.
+<<err-NotFound,Not Found>>:: `subscription_id` does not exist or is not active for this client.
+====
+
+Subscriptions SHOULD be cancelled and cleaned up by the Controller when a client disconnects.
+
+=== Updates
+
+When the Controller processes the creation/update/destruction for an Object, it checks for active subscriptions matching that object. For each match, the Controller sends an `OBJECT_UPDATED` message to the subscribed client(s). This message requires no reply from the client.
+
+.Message: `OBJECT_UPDATED`
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* Identifies the subscription that triggered this message.
+
+| `object_id`
+| `uint32`
+| *Required:* Identifies the Object that was updated or destroyed.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The type of Object identified by `object_id`.
+
+| `update_type`
+| `uint8`
+| *Required:* The type of Object update: (0=Creation, 1=Modification, 2=Destruction)
+
+| `delta`
+| <<schema-PartialObjectType, `Optional<PartialObjectType>`>>
+| A FlatBuffers Union containing the specified changed properties. This field can only be absent if `update_type` is `2`, otherwise it MUST be defined.
+|===
+
+=== Property Filters
+
+Clients MAY filter `READ_OBJECT` or `SUBSCRIBE` results based on specific object properties using the optional `filter` field, which takes a list of numeric <<enum-PropertyID,Property IDs>>.
+
+When the Controller is processing a request containing a filter, the Controller MUST validate that every ID in the provided list is a valid, defined Property ID for the specified `object_type`. If any ID is invalid, the Controller MUST reject the entire request with an <<err-InvalidMessage,Invalid Message>> error. The Controller MUST NOT ignore invalid IDs.
+
+If validation passes, the Controller uses the provided list to filter results. If the list is absent or empty, no filtering occurs.

@@ -1,0 +1,29 @@
+[appendix]
+[[protocol-errors]]
+== Protocol Errors
+
+Akari defines reserved status codes for some errors. Errors should only be returned on messages that specify `reply_to`.
+
+|===
+| Name | Description | Error Code
+
+[[err-InvalidMessage]]
+| *Invalid Message*
+| Returned if a request message body, while structurally valid (passed verification), contained semantically invalid parameters or could not be processed as requested.
+| `1`
+
+[[err-Unauthorized]]
+| *Unauthorized*
+| Returned when the requesting client does not have permission to perform the requested action on the target object or resource.
+| `2`
+
+[[err-NotFound]]
+| *Not Found*
+| Returned when a referenced object or resource does not exist.
+| `3`
+
+[[err-Conflict]]
+| *Conflict*
+| Returned when the requested operation could not be completed because it conflicts with the current state of a resource.
+| `4`
+|===

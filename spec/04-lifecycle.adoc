@@ -1,0 +1,84 @@
+[[lifecycle]]
+== Client Lifecycle
+
+This section describes how clients connect to, register with and disconnect from the Controller.
+
+=== Connection
+
+Clients initiate communication by connecting to the Controller's well-known UDS.
+
+1. The Controller MUST create and listen on a UDS socket upon startup.
+   While the precise mechanism for clients to discover the Controller's socket path is outside the strict scope of the specification, recommended methods are:
+   * An environment variable, `$AKARI_SOCKET`, containing the full path to the Controller's socket. Clients SHOULD prioritize using the path from this variable if it is set and valid.
+   * If `$AKARI_SOCKET` is not set, clients SHOULD look for the socket at a standard path within the user's runtime directory, defined by `$XDG_RUNTIME_DIR`. The RECOMMENDED path is `$XDG_RUNTIME_DIR/akari-0`.
+2. A client connects to the determined socket path using standard OS mechanisms.
+3. Once the connection is established, the communication channel operates asynchronously using the <<messages, message format>> over the <<transport-uds, UDS transport>>.
+
+=== Registration
+
+Upon establishing a connection, a client MUST register itself with the Controller to identify its type and capabilities before performing other operations.
+
+The Controller then processes the registration:
+
+1. The Controller MUST verify if `client_type` is `MANAGER`, the Controller MUST check if registering this manager violates any <<manager-uniqueness, uniqueness constraints>>.
+2. The Controller MUST assign a unique `client_id` (greater than 0) to the successfully registering client.
+3. The Controller MUST record the client's ID, type and manager role (if applicable).
+4. If `requested_permissions` is present, and a Permission Manager is registered, the Controller SHOULD forward these requests according to the <<permissions, permission model>>. If no Permission Manager is present, initial requests SHOULD be denied or deferred.
+
+.Message: `REGISTER`
+[%collapsible%open]
+====
+This message is sent by clients to the Controller upon startup.
+
+.Request
+|===
+| Name | Type | Description
+
+| `client_type`
+| <<enum-ClientType, `ClientType`>>
+| Indicating whether the client is an `APPLICATION` (0) or a `MANAGER` (1)
+
+| `manager_role`
+| <<enum-ManagerRole, `Optional<ManagerRole>`>>
+| Specifies the role the Manager intends to fulfill (e.g. `WINDOW_MANAGER`). Managers that don't fit a role must specify `255`.
+
+| `requested_permissions`
+| <<enum-PermissionScope, `PermissionScope[]` >>
+| Specifies an array of requested permissions for pre-approval.
+|===
+
+.Response
+|===
+| Name | Type | Description
+
+| `client_id`
+| `uint32`
+| The client ID assigned to the new client.
+|===
+
+.Errors
+<<err-InvalidMessage,Invalid Message>>::
+  * `client_type` is not `ClientType`
+  * `manager_role` is not `ManagerRole`
+  * `requested_permissions` contains an invalid `PermissionScope`
+<<err-Conflict,Conflict>>:: Registering the client vould violate uniqueness constraints.
+====
+
+=== Disconnection
+
+Clients may disconnect explicitly or implicitly.
+
+.Explicit Disconnection
+1. A client MAY send a `DISCONNECT` message to the Controller
+2. Upon receiving `DISCONNECT`, the Controller SHOULD acknowledge and then MUST close the connection and clean up associated resources.
+
+.Implicit Disconnection
+If the Controller detects that a client's UDS connection has been closed, it MUST treat this as an implicit disconnection.
+
+==== Resource Cleanup
+
+Upon any disconnection (explicit or implicit), the Controller MUST perform cleanup, which includes:
+
+* Closing the socket connection.
+* Destroying all <<objects>> owned by the disconnected client.
+* Notifying other relevant clients about the destruction of objects or the client's disconnection where necessary.

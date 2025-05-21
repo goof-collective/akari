@@ -1,0 +1,78 @@
+[[architecture]]
+== Architecture
+
+=== Overview
+
+Akari follows a component-based architecture. Unlike integrated display server models, Akari distributes responsibilities across distinct processes communicating via IPC mechanisms.
+
+At its core is a central *Controller* acting as a message broker and state controller. Specialized *Manager* processes connect to the Controller to provide system services like window management or input handling. Standard *Applications* also connect as clients to display content and receive input.
+
+  ┌───────────┐                                ┌───────────┐
+  │    App    │◄──┐                        ┌──►│  Manager  │
+  └───────────┘   │                        │   └───────────┘
+  ┌───────────┐   │    ┌──────────────┐    │   ┌───────────┐
+  │    App    │◄──┼───►│  Controller  │◄───┼──►│  Manager  │
+  └───────────┘   │    └──────────────┘    │   └───────────┘
+  ┌───────────┐   │                        │   ┌───────────┐
+  │    App    │◄──┘                        └──►│  Manager  │
+  └───────────┘                                └───────────┘
+
+=== Core Components
+
+Akari defines three primary component roles:
+
+==== Controller
+
+Role:: The central authority in an Akari session. It acts as a message broker,  manages authoritive object state, and enforces protocol rules. It is essential for system operation.
+
+Responsibilities::
+  * Manage client connections, disconnections and lifecycle
+  * Route messages between clients (Applications and Managers) according to protocol rules and message targets (see <<communication-model>>).
+  * Maintain the authoritive state for all Akari <<objects>>.
+  * Mediate permission requests between clients and the Permission Manager (see <<permissions>>).
+
+Implementation:: Typically a standalone daemon process.
+
+==== Managers
+
+Role:: Specialized, often priviliged components that provide core desktop system services. Managers act as clients of the Controller but are the primary providers of user-facing functionality.
+
+Implementation:: Independent processes communicating with the Controller
+
+===== Recognized Managers
+
+Akari defines roles for essential managers required for a baseline functional system. Compliant Akari systems MUST provide implementations for these roles, though different implementations MAY be used.
+
+==== Applications
+
+Role:: Standard user-facing programs that display graphical content and interact with the user. Applications are clients of the Controller and consumers of services prvoided by Managers.
+
+Implementation:: Standard programs that implement the Akari protocol
+
+Responsibilities:: 
+  * Establish a connection to the Controller
+  * Create and manage their own <<window, `Window` objects>> via the Controller
+  * Render content into associated <<buffer, `Buffer` objects>>
+  * Commit buffer updates and state changes via <<frame-synchronization, synchronization mechanisms>>.
+  * Process <<inputevent, `InputEvent`>> messages and <<change-notification, `ChangeNotification`>> messages
+
+[[communication-model]]
+=== Communication Model
+
+All communication between Applications and Managers MUST be mediated by the Controller. Direct communication between other clients over the Akari protocol is forbidden.
+
+  ┌───────────┐  "Hello, app" ┌──────────────┐  "Hello, app" ┌───────────┐
+  │           │◄──────────────┤              │◄──────────────┤           │
+  │    App    │               │  Controller  │               │  Manager  │
+  │           ├──────────────►│              │x─x─x─x─x─x─x─x│           │
+  └───────────┘ "Hi, manager" └──────────────┘               └───────────┘
+
+NOTE: As shown above, messages sent by Applications to other clients are blocked by the Controller. Applications cannot send messages directly to other clients.
+
+[[communication-constraints]]
+==== Communication Constraints
+
+* Applications MUST NOT send messages directly to other Applications or Managers. They MUST send all messages to the Controller (typically `target=0` for requests to the Controller itself, or replies). Messages sent by Applications with `target` set to another client ID MUST be rejected by the Controller.
+* Managers MAY send messages to other specific clients (Applications or other Managers) by setting the `MessageHeader.target` field to the recipient's client ID and sending the message to the Controller. The Controller MUST forward such messages.
+* The Controller MAY send messages to any client (e.g., notifications, replies).
+

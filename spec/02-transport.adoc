@@ -1,0 +1,34 @@
+[[transport]]
+== Transport Mechanism
+
+Akari defines two primary mechanisms for communication between the Controller and clients: Unix Domain Sockets (UDS) for general message passing and shared memory buffers for time-sensitive bulk data transfer.
+
+[[transport-uds]]
+=== Unix Domain Sockets
+
+The primary transport for Akari protocol messages MUST be UDS.
+
+Clients establish a connection by connecting to a well-known UDS path created by the Controller upon startup. The mechanism for discovering this path is outside the scope of this protocol (e.g. environment variables, standard path).
+
+Communication is bidirectional. Both the Controller and connected clients MAY send and receive messages asynchronously.
+
+All messages transferred over UDS MUST be serialized using the *FlatBuffers* serialization library, conforming to the schemas defined in <<messages>>. Implementations MUST use the FlatBuffers Verifier on all received messages before processing (see <<message-verification>>).
+
+File descriptor passing (for <<shared-memory-buffers>> and <<frame-synchronization, fences>>) MUST be performed using `SCM_RIGHTS` ancillary data over the UDS connection.
+
+=== Shared Memory Buffers
+
+For bulk data transfer requiring minimal latency and overhead (primarily graphical content), Akari defines shared memory buffers.
+
+Implementations MUST support two types of shared memory buffers, corresponding to different use cases:
+
+Data Buffers (`memfd`):: Anonymous memory file descriptors created using `memfd_create(2)`. These provide CPU-accessible shared memory suitable for general data sharing or software rendering.
+DMA Buffers (`DMA-BUF`):: File descriptors representing buffers accessible via Direct Memory Access (DMA), typically managed by graphics or multimedia hardware drivers. These are essential for efficient zero-copy sharing of graphical buffers between applications, the Window Manager, and the GPU.
+
+Roles::
+  Producer::: The client that creates and owns the buffer, typically having exclusive write access.
+  Consumer::: Any other client granted read-only access to the buffer.
+
+The internal data layout or schema within a shared memory buffer is NOT defined by the Akari protocol itself. Consumers MUST interpret the buffer's content based on metadata provided separately (e.g., stored in the corresponding <<buffer, `Buffer` object>>).
+
+Access to shared memory buffers, especially `DMA-BUF` used for rendering, requires synchronization. This MUST be handled using explicit synchronization primitives, primarily fence file descriptors passed via UDS. See <<frame-synchronization>>.
