@@ -1,9 +1,11 @@
 name: Asciidoctor Reducer
 
 on:
-  push:
-    paths:
-      - "spec/parts/**/*.adoc"
+  release:
+    types: [published]
+  pull_request:
+    types: [closed]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
