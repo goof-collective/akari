@@ -5,6 +5,12 @@
 :xrefstyle: full
 chocycat <chocycat@catboy.to>
 
+:tip-caption: 🔎
+:note-caption: ℹ️
+:important-caption: ❗
+:caution-caption: ⚠️
+:warning-caption: 🚨
+
 == Abstract
 
 This document specifies Akari, a protocol for building Linux display systems based on a highly modular, component-based architecture. The primary goal is to provide a flexible and independent foundation for graphical sessions by enabling clearly defined and interchangeable core components.
