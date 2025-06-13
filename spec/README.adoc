@@ -322,13 +322,15 @@ Upon any disconnection (explicit or implicit), the Controller MUST perform clean
 [[objects]]
 == Objects
 
-Akari manages the shared state of the desktop system, such as windows and buffers, through entities called **Objects**.
-
 === Concepts
 
 Objects represent identifiable resources whose authoritative state is maintained exclusively by the **Controller**.
 
 Interaction with Objects occurs indirectly via operational messages sent to the Controller: `CREATE_OBJECT`, `READ_OBJECT`, `UPDATE_OBJECT`, and `DESTROY_OBJECT`. These messages identify the target Object and contain structured payloads, typically using <<payload-unions, FlatBuffers Unions>>, to handle data specific to different Object types efficiently and safely.
+
+Every Object instance has exactly one **owner**, which is the `client_id` of the client that successfully requested its creation. Ownership is a key aspect of the access control model, particularly for Applications.
+
+When a client disconnects (explicitly via `DISCONNECT` or implicitly due to socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client. Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2` (destruction).
 
 === Object Identity
 
@@ -341,7 +343,7 @@ Each Object instance is assigned a unique `object_id` (`uint32`) by the Controll
 
 === Interaction Messages
 
-Interacting with Objects follows a CRUD pattern.
+Interacting with Objects follows a CRUD-like pattern using messages directed to the Controller.
 
 .Message: `CREATE_OBJECT`
 [%collapsible%open]
@@ -389,7 +391,7 @@ Requests the Controller to read the current properties of an existing Object ins
 
 | `filter`
 | `Optional<uint16[]>`
-| A list of specific Property IDs to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+| A list of specific <<enum-PropertyID, Property IDs>> to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
 |===
 
 .Response
@@ -402,7 +404,7 @@ Requests the Controller to read the current properties of an existing Object ins
 
 | `object_type`
 | <<enum-ObjectType, `objectType`>>
-| *Required:* The actual type of the Object read.
+| *Required:* The actual type of the Object read, as determined by the Controller from the `object_id`.
 
 | `properties`
 | <<schema-ObjectProps, `objectProps`>>
@@ -410,9 +412,8 @@ Requests the Controller to read the current properties of an existing Object ins
 |===
 
 .Errors
-<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read this Object.
 <<err-NotFound,Not Found>>:: Object with `object_id` does not exist.
-<<err-InvalidMessage,Invalid Message>>:: The specified `object_type` does not match the actual type of the object found with `object_id`.
+<<err-InvalidMessage,Invalid Message>>:: The `filter` contained invalid Property IDs for the target object's type.
 ====
 
 .Message: `UPDATE_OBJECT`
@@ -430,7 +431,7 @@ Requests the Controller to update properties of an existing Object instance.
 
 | `changes`
 | <<schema-PartialObjectProps, `PartialObjectProps`>>
-| *Required:* A FlatBuffers Union containing a table with only the properties to be changed and their new values.
+| *Required:* A FlatBuffers Union containing a table with only the properties to be changed and their new values. The specific table within the union MUST correspond to the actual type of object identified by `object_id`.
 |===
 
 .Response
@@ -472,47 +473,52 @@ When a client disconnects (explicitly via a `DISCONNECT` message or implicitly v
 
 Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2`.
 
+[[permissions-objects]]
 === Permissions
-Access control for reading, modifying, and deleting objects is based on client **Role** (Manager or Application), object **Ownership**, and property-specific **Authority** levels defined with each property (see <<object-definitions>>).
 
-Every object instance has exactly one **owner**, which is the client that initially created it via `CREATE_OBJECT`.
+Access control for Akari Objects is determined by the requesting client's role (`APPLICATION` or `MANAGER`) and Object ownership. The following table summarizes the permissions for core Object operations:
 
-The default access rights are summarized below:
-
-.Access Control
-[cols="1,^1,^1,^1,^1"]
+.Object Access Control
 |===
-| Role \ Action | Owner (App) | Owner (Mgr) | Manager (Non-Owner) | Application (Non-Owner)
+| Operation | `APPLICATION` (Owner) | `APPLICATION` (Not Owner) | `MANAGER` | Notes
 
-| Read Properties (`READ_OBJECT`) {fn-readable}
+| `READ_OBJECT`
 | Yes
 | Yes
 | Yes
-| No (Requires Permission) <1>
+| All clients can read metadata of any object.
 
-| Update Properties (`UPDATE_OBJECT`) <3>
-| Conditional <4>
-| Yes
-| Yes
-| No (Requires Permission) <2>
-
-| Delete Object (`DELETE_OBJECT`)
-| Yes
+| `UPDATE_OBJECT`
 | Yes
 | No
-| No (Requires Permission) <2>
+| Yes
+| Applications can only update objects they own. Managers can update any object.
+
+| `DESTROY_OBJECT`
+| Yes
+| Yes
+| Yes
+| Applications can destroy objects they own. Managers can destroy any object.
+
+| `CREATE_OBJECT`
+| Yes
+| N/A
+| Yes
+| Any client may request object creation. Controller MAY restrict creation of certain `ObjectType`s (e.g., <<obj-Output, `Output`>>s) to `MANAGER` clients only (resulting in <<err-Unauthorized, `Unauthorized`>> for an Application).
+
+| `SUBSCRIBE`
+| Yes
+| Yes
+| Yes
+| Permission to subscribe is implicit if the client can read the object(s); thus, all clients can subscribe.
 |===
-<1> Assumes properties are marked Readable (`R` flag). Clients may lack permission to read specific objects even if they exist.
-<2> Access/permission may potentially be granted via the <<permissions, Permission Manager>> system (details TBD).
-<3> Applies only to properties marked Writable (`W` flag).
-<4> Application owners **MUST NOT** modify properties where the defined `Authority` level is `MANAGER`. See <<property-authority>>.
 
 [[object-subscriptions]]
 === Subscriptions
 
 To monitor Object state changes efficiently without polling, clients use Akari's publish-subscribe (Pub/Sub) mechanism.
 
-Clients can subscribe to changes on specific Object instances or all instances of a specific core Object type. When a relevant change occurs, the Controller sends notifications containing only the modified data (the delta) to subscribed clients.
+Clients can subscribe to changes on specific object instances or all instances of a specific core Object type. When a relevant change occurs (and matches the subscription's filter, if any), the Controller sends notifications containing only the modified data (the delta) to subscribed clients.
 
 .Message: `SUBSCRIBE`
 [%collapsible%open]
@@ -529,11 +535,11 @@ Requests the Controller to create a new subscription for monitoring object state
 
 | `object_type`
 | <<enum-ObjectType, `Optional<ObjectType>`>>
-| The type of objects to subscribe to when `object_id` is `0`. MUST be ignored if `object_id` is non-zero.
+| The type of objects to subscribe to when `object_id` is `0`. This field MUST be present if `object_id` is `0`. It MUST be ignored if `object_id` is non-zero.
 
 | `filter`
 | `Optional<uint16[]>`
-| A list of specific Property IDs (relative to the `object_type`) to retrieve. If absent or empty, all readable properties are returned. If present, only properties corresponding to the valid IDs in this list are returned. See <<property-filters>>.
+| An optional list of specific <<enum-PropertyID, Property IDs>> to receive updates for. If absent or empty, updates for all property changes of the subscribed Object(s) are sent. If present, only changes to properties corresponding to the valid IDs in this list will trigger an `OBJECT_UPDATED` message. See <<property-filters>>.
 |===
 
 .Response
@@ -546,9 +552,8 @@ Requests the Controller to create a new subscription for monitoring object state
 |===
 
 .Errors
-<<err-Unauthorized,Unauthorized>>:: Client lacks permission to read/subscribe to the target Object(s).
-<<err-NotFound,Not Found>>:: Specified `object_id` (if > 0) or `object_type` does not exist.
-<<err-InvalidMessage,Invalid Message>>:: Invalid combination of `object_id` and `object_type` (e.g. `object_id=0` and no `object_type`).
+<<err-NotFound,Not Found>>:: Specified `object_id` (if > 0) or `object_type` does not exist. Or, if `object_id` is `0` and the specified `object_type` is not a recognized type.
+<<err-InvalidMessage,Invalid Message>>:: Invalid combination of parameters (e.g., `object_id=0` and no `object_type` provided, or `filter` contains invalid Property IDs for the target object type).
 ====
 
 .Message: `UNSUBSCRIBE`
@@ -571,15 +576,14 @@ Cancels an existing subscription.
 |===
 
 .Errors
-<<err-Unauthorized,Unauthorized>>:: Client does not own the `subscription_id`.
 <<err-NotFound,Not Found>>:: `subscription_id` does not exist or is not active for this client.
 ====
 
-Subscriptions SHOULD be cancelled and cleaned up by the Controller when a client disconnects.
+Subscriptions MUST be cancelled and cleaned up by the Controller when a client disconnects.
 
 === Updates
 
-When the Controller processes the creation/update/destruction for an Object, it checks for active subscriptions matching that object. For each match, the Controller sends an `OBJECT_UPDATED` message to the subscribed client(s). This message requires no reply from the client.
+When a Controller processes the creation/update/destruction of an Object, it checks for active subscriptions that match that Object and whose filter (if any) includes the changes. For each matching subscription, the Controller sends an `OBJECT_UPDATED` message to the subscribed client(s). This message requires no reply from the client.
 
 .Message: `OBJECT_UPDATED`
 |===
@@ -603,12 +607,15 @@ When the Controller processes the creation/update/destruction for an Object, it 
 
 | `delta`
 | <<schema-PartialObjectType, `Optional<PartialObjectType>`>>
-| A FlatBuffers Union containing the specified changed properties. This field can only be absent if `update_type` is `2`, otherwise it MUST be defined.
+| A FlatBuffers Union containing the specified changed properties.
+    For `update_type=0` (Creation), this field MUST be present and contain the initial full properties of the object (respecting the subscription filter).
+    For `update_type=1` (Modification), this field MUST be present and contain only the properties that changed (respecting the subscription filter).
+    For `update_type=2` (Destruction), this field MUST be absent.
 |===
 
 === Property Filters
 
-Clients MAY filter `READ_OBJECT` or `SUBSCRIBE` results based on specific object properties using the optional `filter` field, which takes a list of numeric <<enum-PropertyID,Property IDs>>.
+Clients MAY filter the properties returned in `READ_OBJECT` responses and `OBJECT_UPDATED` notifications by using the optional `filter` field in `READ_OBJECT` and `SUBSCRIBE` requests. This field takes a list of <<enum-PropertyID,Property IDs>>.
 
 When the Controller is processing a request containing a filter, the Controller MUST validate that every ID in the provided list is a valid, defined Property ID for the specified `object_type`. If any ID is invalid, the Controller MUST reject the entire request with an <<err-InvalidMessage,Invalid Message>> error. The Controller MUST NOT ignore invalid IDs.
 
