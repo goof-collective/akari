@@ -1,11 +1,7 @@
 [[object-definitions]]
 == Core Object Definitions
 
-This section defines the properties associated wit hthe Core Object Types managed by the Akari Controller. These properties represent the authoritive state stored by the Controller and are accessed and modified via the <<interaction-messages, Object Interaction Messages>>.
+This section defines the properties associated with the Core Object Types managed by the Akari Controller. These properties represent the authoritive state stored by the Controller and are accessed and modified via the <<interaction-messages, Object Interaction Messages>>.
 
-The actual data payloads within these messages utilize FlatBuffers Unions (`ObjectProps` for full state, `PartialObjectProps` for delta state) containing type-specific tables based on the definitions below (e.g. `WindowProperties`, `WindowPropertiesDelta`).
-
-=== Property Flags
-
-The following flags are used in the property definition tables below to indicate behavior and access control:
+The actual data payloads within these messages utilize FlatBuffers Unions (`AnyObject` for full state, `AnyPartialObject` for delta state) containing type-specific tables based on the definitions below (e.g. `Window`, `WindowDelta`).
 

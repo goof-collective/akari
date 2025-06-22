@@ -63,7 +63,7 @@ All communication between the Controller and clients over the primary <<transpor
 
 Within Akari, interactions often follow a request-response pattern, although many messages (like notifications or events) do not require a direct reply.
 
-Requests:: A message initiating an operation or query MAAY implicitly or explicitly require a response.
+Requests:: A message initiating an operation or query MAY implicitly or explicitly require a response.
 Responses:: A message is considered a response _if and only if_ its `MessageHeader.reply_to` field contains the `id` of a previously sent Request message.
 
 For any given Request message, the recipient MUST send at most one Response message.
@@ -79,8 +79,8 @@ For security against malicious messages, implementations MUST validate every rec
 2. If this initial verification fails:
   * The message is structurally invalid and its contents cannot be trusted.
   * The message MUST be discarded immediately.
-  * No data access MUST be attempted. 
-  * An error SHOULD be logged, potentially including the source if known. 
+  * No data access MUST be attempted.
+  * An error SHOULD be logged, potentially including the source if known.
   * If the receiving component is the Controller and the sender is a client, the Controller MAY choose to disconnect the client if invalid messages persist.
   * *No Response or Error message MUST be sent back in this case.*
 3. If outer verification passes, the `header` fields can be safely accessed.
@@ -94,4 +94,3 @@ For security against malicious messages, implementations MUST validate every rec
   * If the original message normally expects a response, the receiver SHOULD send a <<message-replies, Response message>> back to the original sender.
     * This Response must set the `status` to a non-zero error code (e.g., <<err-InvalidMessage,Invalid Message>>, <<err-Unauthorized,Unauthorized>>).
   * If the original message did not normally expect a response, the receiver MAY simply discard the message with the invalid body and log the error.
-

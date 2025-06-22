@@ -1,15 +1,15 @@
 [[objects]]
 == Objects
 
-=== Concepts
-
 Objects represent identifiable resources whose authoritative state is maintained exclusively by the **Controller**.
+
+=== Concepts
 
 Interaction with Objects occurs indirectly via operational messages sent to the Controller: `CREATE_OBJECT`, `READ_OBJECT`, `UPDATE_OBJECT`, and `DESTROY_OBJECT`. These messages identify the target Object and contain structured payloads, typically using <<payload-unions, FlatBuffers Unions>>, to handle data specific to different Object types efficiently and safely.
 
 Every Object instance has exactly one **owner**, which is the `client_id` of the client that successfully requested its creation. Ownership is a key aspect of the access control model, particularly for Applications.
 
-When a client disconnects (explicitly via `DISCONNECT` or implicitly due to socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client. Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2` (destruction).
+When a client disconnects (explicitly via `DISCONNECT` or implicitly due to socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client. Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_DESTROYED` message.
 
 === Object Identity
 
@@ -37,9 +37,9 @@ Requests the Controller to create a new Object instance of a specific type.
 | <<enum-ObjectType, `objectType`>>
 | *Required*: The <<enum-ObjectType, Object Type>> to create.
 
-| `properties`
-| <<schema-ObjectProps, `ObjectProps`>>
-| *Required*: A FlatBuffers Union containing a table with the initial properties specific to the `object_type`.
+| `object`
+| <<schema-AnyObject, `AnyObject`>>
+| *Required*: A FlatBuffers Union containing a table with the initial Object data specific to the `object_type`.
 |===
 
 .Response
@@ -82,12 +82,12 @@ Requests the Controller to read the current properties of an existing Object ins
 | *Required:* The ID of the Object whose properties are being returned. This MUST match the request's `object_id`.
 
 | `object_type`
-| <<enum-ObjectType, `objectType`>>
+| <<enum-ObjectType, `ObjectType`>>
 | *Required:* The actual type of the Object read, as determined by the Controller from the `object_id`.
 
-| `properties`
-| <<schema-ObjectProps, `objectProps`>>
-| *Required:* A FlatBuffers Union containing a table with the current, readable properties specific to the `object_type`.
+| `object`
+| <<schema-AnyObject, `AnyObject`>>
+| *Required:* A FlatBuffers Union containing a table with the current, readable Object data specific to the `object_type`.
 |===
 
 .Errors
@@ -108,9 +108,9 @@ Requests the Controller to update properties of an existing Object instance.
 | `uint32`
 | *Required:* The ID of the Object instance to update.
 
-| `changes`
-| <<schema-PartialObjectProps, `PartialObjectProps`>>
-| *Required:* A FlatBuffers Union containing a table with only the properties to be changed and their new values. The specific table within the union MUST correspond to the actual type of object identified by `object_id`.
+| `delta`
+| <<schema-AnyPartialObject, `AnyPartialObject`>>
+| *Required:* A FlatBuffers Union containing a table with only the Object data to be changed and their new values. The Object data MUST correspond to the actual type of object identified by `object_id`.
 |===
 
 .Response
@@ -150,7 +150,7 @@ Requests the Controller to destroy an existing Object instance.
 
 When a client disconnects (explicitly via a `DISCONNECT` message or implicitly via socket closure), the Controller MUST automatically destroy all Object instances currently owned by that client.
 
-Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_UPDATED` message with `update_type=2`.
+Upon destruction, the Controller removes the Object's state and MUST notify relevant subscribers via an `OBJECT_DESTROYED` message.
 
 [[permissions-objects]]
 === Permissions
@@ -246,7 +246,7 @@ Cancels an existing subscription.
 
 | `subscription_id`
 | `uint32`
-| *Required:* THe ID of the subscription to cancel, previously returned by a `SUBSCRIBE` reply.
+| *Required:* The ID of the subscription to cancel, previously returned by a `SUBSCRIBE` reply.
 |===
 
 .Response
@@ -264,6 +264,27 @@ Subscriptions MUST be cancelled and cleaned up by the Controller when a client d
 
 When a Controller processes the creation/update/destruction of an Object, it checks for active subscriptions that match that Object and whose filter (if any) includes the changes. For each matching subscription, the Controller sends an `OBJECT_UPDATED` message to the subscribed client(s). This message requires no reply from the client.
 
+.Message: `OBJECT_CREATED`
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* Identifies the subscription that triggered this message.
+
+| `object_id`
+| `uint32`
+| *Required:* Identifies the Object that was created.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The type of Object identified by `object_id`.
+
+| `data`
+| <<schema-AnyObject, `AnyObject`>>
+| *Required:* A FlatBuffers Union containing a table with the full Object data specific to the `object_type`.
+|===
+
 .Message: `OBJECT_UPDATED`
 |===
 | Name | Type | Description
@@ -280,16 +301,26 @@ When a Controller processes the creation/update/destruction of an Object, it che
 | <<enum-ObjectType, `objectType`>>
 | *Required:* The type of Object identified by `object_id`.
 
-| `update_type`
-| `uint8`
-| *Required:* The type of Object update: (0=Creation, 1=Modification, 2=Destruction)
-
 | `delta`
-| <<schema-PartialObjectType, `Optional<PartialObjectType>`>>
-| A FlatBuffers Union containing the specified changed properties.
-    For `update_type=0` (Creation), this field MUST be present and contain the initial full properties of the object (respecting the subscription filter).
-    For `update_type=1` (Modification), this field MUST be present and contain only the properties that changed (respecting the subscription filter).
-    For `update_type=2` (Destruction), this field MUST be absent.
+| <<schema-AnyPartialObject, `AnyPartialObject`>>
+| *Required:* A FlatBuffers Union containing a table with the changed Object data specific to the `object_type`.
+|===
+
+.Message: `OBJECT_DESTROYED`
+|===
+| Name | Type | Description
+
+| `subscription_id`
+| `uint32`
+| *Required:* Identifies the subscription that triggered this message.
+
+| `object_id`
+| `uint32`
+| *Required:* Identifies the Object that was destroyed.
+
+| `object_type`
+| <<enum-ObjectType, `objectType`>>
+| *Required:* The type of Object identified by `object_id`.
 |===
 
 === Property Filters
